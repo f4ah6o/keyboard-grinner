@@ -198,22 +198,35 @@ def assign_circles_to_rects(rects: List[RectInstance], circles: Dict[int, Dict[s
     """
     segment 種別に応じて、各矩形に円を割り当てる。
 
-    * "top"     セグメント → 上円 "top"
-    * "bottom1" セグメント → 左下円 "bottom_left"
-    * "bottom2" セグメント → 右下円 "bottom_right"
+    * "top"     セグメント → 上円 "top"（象限制約をチェック）
+    * "bottom1" セグメント → 左下円 "bottom_left"（象限制約をチェック）
+    * "bottom2" セグメント → 右下円 "bottom_right"（象限制約をチェック）
     * "horizontal"           → 円なし（回転なし）
 
     各矩形は自分の行の円を参照する。
+    象限制約を満たさない場合は円を割り当てない。
     """
     for r in rects:
+        candidate_circle_name: Optional[str] = None
+
         if r.segment == "top":
-            r.circle_name = "top"
+            candidate_circle_name = "top"
         elif r.segment == "bottom1":
-            r.circle_name = "bottom_left"
+            candidate_circle_name = "bottom_left"
         elif r.segment == "bottom2":
-            r.circle_name = "bottom_right"
+            candidate_circle_name = "bottom_right"
         else:
             r.circle_name = None
+            continue
+
+        # 象限制約チェック
+        if candidate_circle_name is not None:
+            circle = circles[r.row][candidate_circle_name]
+            if check_quadrant_constraint(r, circle):
+                r.circle_name = candidate_circle_name
+            else:
+                # 制約を満たさない場合は円を割り当てない（水平のまま）
+                r.circle_name = None
 
 
 def choose_pivot(rect: RectInstance, circle: Circle) -> np.ndarray:
@@ -233,6 +246,41 @@ def choose_pivot(rect: RectInstance, circle: Circle) -> np.ndarray:
     d2 = np.sum((corners - np.array([circle.cx, circle.cy])) ** 2, axis=1)
     pivot = corners[int(np.argmin(d2))]
     return pivot
+
+
+def check_quadrant_constraint(rect: RectInstance, circle: Circle) -> bool:
+    """
+    矩形が円の象限制約を満たしているかチェックする。
+
+    制約:
+        - top円: 矩形中心が円から見て第3,4象限（y < circle.cy）
+        - bottom_left円: 矩形中心が円から見て第1象限（x > circle.cx かつ y > circle.cy）
+        - bottom_right円: 矩形中心が円から見て第2象限（x < circle.cx かつ y > circle.cy）
+
+    Returns:
+        True: 制約を満たす
+        False: 制約を満たさない
+    """
+    # 矩形の中心座標
+    rect_cx = rect.base_x + rect.width * 0.5
+    rect_cy = rect.base_y + rect.height * 0.5
+
+    # 円中心を原点とした相対座標
+    rel_x = rect_cx - circle.cx
+    rel_y = rect_cy - circle.cy
+
+    if circle.name == "top":
+        # 第3,4象限: y < 0（円より下）
+        return rel_y < 0
+    elif circle.name == "bottom_left":
+        # 第1象限: x > 0 かつ y > 0（円の右上）
+        return rel_x > 0 and rel_y > 0
+    elif circle.name == "bottom_right":
+        # 第2象限: x < 0 かつ y > 0（円の左上）
+        return rel_x < 0 and rel_y > 0
+    else:
+        # 未知の円名の場合は制約なし
+        return True
 
 
 def compute_rotation_angles(
