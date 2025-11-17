@@ -163,11 +163,11 @@ def place_circles(
         * x座標は全行で共通:
           - 上円: 全体幅の中央 (W/2)
           - 下円: 全体幅の 1/4, 3/4
-        * y座標は各行の矩形位置に基づいて計算:
-          - 上円: その行より少し上
-          - 下円: その行より少し下
+        * y座標は全行で共通:
+          - 上円: 行0の少し上
+          - 下円: 行0の少し下
 
-    半径は後で矩形のピボット距離から更新する。
+    半径は後で矩形のピボット距離から行ごとに更新する。
     """
     total_width = infer_total_width(rects)
 
@@ -176,16 +176,15 @@ def place_circles(
     bottom_left_cx = total_width * 0.25
     bottom_right_cx = total_width * 0.75
 
+    # 3つの中心y座標（全行で共通）
+    # 行0を基準に計算
+    y_row_0 = 0.0
+    top_cy = y_row_0 + key_height + (key_height + row_gap) * 0.5
+    bottom_cy = y_row_0 - (key_height + row_gap) * 0.5
+
     circles: Dict[int, Dict[str, Circle]] = {}
 
     for row_index in range(len(row_specs)):
-        # 各行のy座標
-        y_row = -(key_height + row_gap) * row_index
-
-        # 各行の円のy座標を計算
-        top_cy = y_row + key_height + (key_height + row_gap) * 0.5
-        bottom_cy = y_row - (key_height + row_gap) * 0.5
-
         circles[row_index] = {
             "top": Circle(name="top", row=row_index, cx=top_cx, cy=top_cy),
             "bottom_left": Circle(name="bottom_left", row=row_index, cx=bottom_left_cx, cy=bottom_cy),
