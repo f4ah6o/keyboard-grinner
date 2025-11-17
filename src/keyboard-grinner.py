@@ -1,6 +1,8 @@
-from dataclasses import dataclass
-from typing import List, Optional, Literal, Dict
+import json
 import math
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, List, Optional, Literal, Dict, Tuple
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -41,6 +43,14 @@ class RowSpec:
             raise ValueError(
                 "sum(segment_lengths) must equal len(key_widths)"
             )
+
+
+@dataclass
+class LayoutConfig:
+    row_specs: List[RowSpec]
+    key_height: float = 1.0
+    row_gap: float = 0.2
+    max_angle: Optional[float] = None
 
 
 @dataclass
@@ -358,13 +368,28 @@ def plot_layout(rects: List[RectInstance], circles: Dict[str, Circle]) -> None:
     matplotlib で矩形と円を描画する。
     """
     fig, ax = plt.subplots()
+    ax.set_facecolor("white")
+
+    if rects:
+        row_count = max(r.row for r in rects) + 1
+    else:
+        row_count = 0
+    cmap = plt.get_cmap("tab10", max(row_count, 1))
 
     # 矩形
     for r in rects:
         poly = r.polygon
         if poly is None:
             continue
-        patch = Polygon(poly, closed=True, fill=False, linewidth=1.0)
+        color = cmap(r.row % cmap.N)
+        patch = Polygon(
+            poly,
+            closed=True,
+            fill=True,
+            facecolor=(color[0], color[1], color[2], 0.35),
+            edgecolor=color,
+            linewidth=1.2,
+        )
         ax.add_patch(patch)
 
     # 円（描画用）
@@ -374,12 +399,36 @@ def plot_layout(rects: List[RectInstance], circles: Dict[str, Circle]) -> None:
         circle_patch = MplCircle((c.cx, c.cy), c.radius, fill=False, linestyle="--")
         ax.add_patch(circle_patch)
 
+    if rects:
+        xs = np.concatenate([r.polygon[:, 0] for r in rects if r.polygon is not None])
+        ys = np.concatenate([r.polygon[:, 1] for r in rects if r.polygon is not None])
+        padding = 0.5
+        ax.set_xlim(float(xs.min() - padding), float(xs.max() + padding))
+        ax.set_ylim(float(ys.min() - padding), float(ys.max() + padding))
     ax.set_aspect("equal", adjustable="box")
     ax.invert_yaxis()  # 行0が画面上側になるよう反転
     plt.show()
 
 
-def example_usage() -> None:
+def run_layout(
+    row_specs: List[RowSpec],
+    *,
+    key_height: float,
+    row_gap: float,
+    max_abs_angle_deg: float,
+) -> Tuple[List[RectInstance], Dict[str, Circle], List[float]]:
+    """パラメータ一式を受け取り、矩形・円・ギャップを計算して返す。"""
+    rects = build_rects(row_specs, key_height=key_height, row_gap=row_gap)
+    circles = place_circles(rects, row_specs, key_height=key_height, row_gap=row_gap)
+    assign_circles_to_rects(rects, circles)
+    compute_rotation_angles(rects, circles, max_abs_angle_deg=max_abs_angle_deg)
+    rotate_rectangles(rects, circles)
+    update_circle_radii(rects, circles)
+    gaps = evaluate_row_gaps(rects, row_count=len(row_specs))
+    return rects, circles, gaps
+
+
+def example_usage(max_abs_angle_deg: float = 90.0) -> None:
     """
     最低限の例。
 
@@ -388,6 +437,7 @@ def example_usage() -> None:
     * セグメント: [水平2, 下円3, 上円3, 下円2, 水平1] など任意
       （本番では、ここを「水平は1 or 2」「下円は1〜3」などの制約を守る形で
        ユーザー入力から決める想定）
+    * max_abs_angle_deg: 1矩形あたりの回転角の上限（度数法）
     """
     row_count = 4
     key_height = 1.0
@@ -399,31 +449,244 @@ def example_usage() -> None:
         segment_lengths = [2, 3, 3, 2, 1]  # 2+3+3+2+1 = 11
         row_specs.append(RowSpec(key_widths=key_widths, segment_lengths=segment_lengths))
 
-    # 1. 基準グリッド配置
-    rects = build_rects(row_specs, key_height=key_height, row_gap=row_gap)
-
-    # 2. 円の自動配置
-    circles = place_circles(rects, row_specs, key_height=key_height, row_gap=row_gap)
-
-    # 3. 矩形への円割り当て
-    assign_circles_to_rects(rects, circles)
-
-    # 4. 回転角計算（±90°以内）
-    compute_rotation_angles(rects, circles, max_abs_angle_deg=90.0)
-
-    # 5. 回転適用
-    rotate_rectangles(rects, circles)
-
-    # 6. 円の半径を描画用に補正
-    update_circle_radii(rects, circles)
-
-    # 7. 行間ギャップの評価（最適化の評価関数に使える）
-    gaps = evaluate_row_gaps(rects, row_count=row_count)
+    rects, circles, gaps = run_layout(
+        row_specs,
+        key_height=key_height,
+        row_gap=row_gap,
+        max_abs_angle_deg=max_abs_angle_deg,
+    )
     print("row gaps:", gaps)
+    plot_layout(rects, circles)
 
-    # 8. 可視化
+
+def parse_layout_matrix(layout_matrix: List[List[Any]]) -> List[List[float]]:
+    """
+    KLE 由来のレイアウト配列を矩形幅のリストに変換する。
+
+    フォーマット例:
+        [
+          ["Q", "W", ...],
+          [{"w": 1.25}, "A", ...]
+        ]
+
+    dict 要素は直後のキーに対する width などの修飾を表すとみなし、
+    ここでは `w` のみサポートする。`x`/`y` シフトなどは未対応。
+    """
+    if not isinstance(layout_matrix, list) or not layout_matrix:
+        raise ValueError("layout_matrix must be a non-empty list of rows")
+
+    rows: List[List[float]] = []
+    totals: List[float] = []
+
+    for row_index, row in enumerate(layout_matrix):
+        if not isinstance(row, list) or not row:
+            raise ValueError(f"layout_matrix[{row_index}] must be a non-empty list")
+
+        widths: List[float] = []
+        pending_width = 1.0
+
+        for token in row:
+            if isinstance(token, dict):
+                if "x" in token and float(token["x"]) != 0.0:
+                    raise ValueError(
+                        "x offsets in layout_matrix are not supported yet (row %d)" % row_index
+                    )
+                if "w" in token:
+                    pending_width = float(token["w"])
+                continue
+
+            if isinstance(token, str):
+                widths.append(float(pending_width))
+                pending_width = 1.0
+            else:
+                raise ValueError(
+                    f"layout_matrix[{row_index}] contains unsupported token type: {type(token)!r}"
+                )
+
+        if not widths:
+            raise ValueError(f"layout_matrix[{row_index}] produced no keys")
+
+        rows.append(widths)
+        totals.append(sum(widths))
+
+    first_total = totals[0]
+    for idx, total in enumerate(totals[1:], start=1):
+        if abs(total - first_total) > 1e-6:
+            raise ValueError(
+                "all rows in layout_matrix must have the same total width; "
+                f"row 0 has {first_total}, row {idx} has {total}"
+            )
+
+    return rows
+
+
+def _validate_segment_lengths(values: List[int], expected: int, *, label: str) -> List[int]:
+    if len(values) != 5:
+        raise ValueError(f"{label} segment_lengths must have 5 integers")
+    if sum(values) != expected:
+        raise ValueError(
+            f"{label} segment_lengths must sum to {expected} (got {sum(values)})"
+        )
+    return [int(v) for v in values]
+
+
+def row_specs_from_layout_matrix(
+    layout_matrix: List[List[Any]],
+    *,
+    default_segments: Optional[List[int]] = None,
+    per_row_segments: Optional[List[List[int]]] = None,
+) -> List[RowSpec]:
+    widths_per_row = parse_layout_matrix(layout_matrix)
+
+    if per_row_segments is not None:
+        if len(per_row_segments) != len(widths_per_row):
+            raise ValueError(
+                "segment_lengths_per_row must match number of rows in layout_matrix"
+            )
+
+    specs: List[RowSpec] = []
+    for row_index, widths in enumerate(widths_per_row):
+        if per_row_segments is not None:
+            segments_raw = per_row_segments[row_index]
+        elif default_segments is not None:
+            segments_raw = default_segments
+        else:
+            segments_raw = [len(widths), 0, 0, 0, 0]
+
+        segments = _validate_segment_lengths(
+            [int(v) for v in segments_raw],
+            len(widths),
+            label=f"layout row {row_index}",
+        )
+
+        specs.append(RowSpec(key_widths=list(widths), segment_lengths=list(segments)))
+
+    return specs
+
+
+def load_layout_config(path: Path) -> LayoutConfig:
+    data = json.loads(path.read_text())
+
+    row_specs: List[RowSpec]
+
+    if "layout_matrix" in data:
+        default_segments = data.get("segment_lengths")
+        per_row_segments = data.get("segment_lengths_per_row")
+        row_specs = row_specs_from_layout_matrix(
+            data["layout_matrix"],
+            default_segments=default_segments,
+            per_row_segments=per_row_segments,
+        )
+    elif "row_specs" in data:
+        row_specs = []
+        for idx, entry in enumerate(data["row_specs"]):
+            if "key_widths" not in entry or "segment_lengths" not in entry:
+                raise ValueError(
+                    f"row_specs[{idx}] must contain key_widths and segment_lengths"
+                )
+            repeat = int(entry.get("repeat", 1))
+            if repeat <= 0:
+                raise ValueError(f"row_specs[{idx}].repeat must be >= 1")
+            key_widths = [float(w) for w in entry["key_widths"]]
+            segments = _validate_segment_lengths(
+                [int(s) for s in entry["segment_lengths"]],
+                len(key_widths),
+                label=f"row_specs[{idx}]",
+            )
+            for _ in range(repeat):
+                row_specs.append(RowSpec(key_widths=list(key_widths), segment_lengths=segments))
+        if not row_specs:
+            raise ValueError("config must define at least one row_spec entry")
+    else:
+        raise ValueError("config must define either layout_matrix or row_specs")
+
+    key_height = float(data.get("key_height", 1.0))
+    row_gap = float(data.get("row_gap", 0.3))
+    max_angle = data.get("max_angle")
+    if max_angle is not None:
+        max_angle = float(max_angle)
+
+    return LayoutConfig(
+        row_specs=row_specs,
+        key_height=key_height,
+        row_gap=row_gap,
+        max_angle=max_angle,
+    )
+
+
+def default_layout_config() -> LayoutConfig:
+    layout_matrix = [
+        ["Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P", "Back Space"],
+        [{"w": 1.25}, "A", "S", "D", "F", "G", "H", "J", "K", "L", {"w": 1.75}, "\"\n'"],
+        [{"w": 1.75}, "Z", "X", "C", "V", "B", "N", "M", "<\n,", ">\n.", {"w": 1.25}, "?\n/"],
+        [{"w": 1.5}, "Super", {"w": 1.5}, "Super", {"w": 2.25}, "Meta", {"a": 0, "w": 2.75}, "", {"a": 4, "w": 1.5}, "Meta", {"w": 1.5}, "Super"],
+    ]
+    segment_lengths_per_row = [
+        [2, 3, 3, 2, 1],
+        [1, 3, 3, 2, 1],
+        [1, 3, 3, 2, 1],
+        [2, 0, 2, 0, 2],
+    ]
+    row_specs = row_specs_from_layout_matrix(
+        layout_matrix, per_row_segments=segment_lengths_per_row
+    )
+    return LayoutConfig(
+        row_specs=row_specs,
+        key_height=1.0,
+        row_gap=0.3,
+        max_angle=20.0,
+    )
+
+
+def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Keyboard layout previewer with rotational segments."
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        help="path to JSON config that defines row_specs, key_height, row_gap, etc.",
+    )
+    parser.add_argument(
+        "--max-angle",
+        type=float,
+        help="maximum absolute rotation angle per rectangle in degrees",
+    )
+    parser.add_argument(
+        "--key-height",
+        type=float,
+        help="override key height (default 1.0 or config value)",
+    )
+    parser.add_argument(
+        "--row-gap",
+        type=float,
+        help="override vertical gap between rows (default 0.3 or config value)",
+    )
+    args = parser.parse_args()
+
+    if args.config:
+        layout = load_layout_config(args.config)
+    else:
+        layout = default_layout_config()
+
+    key_height = args.key_height if args.key_height is not None else layout.key_height
+    row_gap = args.row_gap if args.row_gap is not None else layout.row_gap
+
+    max_angle = layout.max_angle if layout.max_angle is not None else 90.0
+    if args.max_angle is not None:
+        max_angle = args.max_angle
+
+    rects, circles, gaps = run_layout(
+        layout.row_specs,
+        key_height=key_height,
+        row_gap=row_gap,
+        max_abs_angle_deg=max_angle,
+    )
+    print("row gaps:", gaps)
     plot_layout(rects, circles)
 
 
 if __name__ == "__main__":
-    example_usage()
+    main()
