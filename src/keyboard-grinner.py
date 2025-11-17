@@ -97,7 +97,6 @@ def build_rects(
     y座標系:
         行0（最上段）の下辺を y=0 とし、
         下方向に行くほど y がマイナスになるように配置している。
-        （最後に plot 時に invert_yaxis してキーボードっぽく見せる）
     """
     rects: List[RectInstance] = []
 
@@ -425,7 +424,6 @@ def plot_layout(rects: List[RectInstance], circles: Dict[int, Dict[str, Circle]]
         ax.set_xlim(float(xs.min() - padding), float(xs.max() + padding))
         ax.set_ylim(float(ys.min() - padding), float(ys.max() + padding))
     ax.set_aspect("equal", adjustable="box")
-    ax.invert_yaxis()  # 行0が画面上側になるよう反転
     plt.show()
 
 
