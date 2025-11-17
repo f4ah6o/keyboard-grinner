@@ -66,12 +66,14 @@ class RectInstance:
 @dataclass
 class Circle:
     """
-    回転レイアウトの基準となる円（上1・下2）。
+    回転レイアウトの基準となる円。
+    各行ごとに異なるy座標と半径を持つ。
     """
     name: str           # "top", "bottom_left", "bottom_right"
-    cx: float
-    cy: float
-    radius: float = 0.0  # 描画用。矩形から自動で推定する。
+    row: int            # 行番号
+    cx: float           # x座標（全行で共通）
+    cy: float           # y座標（行ごとに異なる）
+    radius: float = 0.0  # 半径（行ごとに異なる。描画用に矩形から自動推定）
 
 
 def build_rects(
@@ -144,41 +146,47 @@ def place_circles(
     row_specs: List[RowSpec],
     key_height: float = 1.0,
     row_gap: float = 0.2,
-) -> Dict[str, Circle]:
+) -> Dict[int, Dict[str, Circle]]:
     """
-    3円の初期配置を決める。
+    各行に3つの円（中心座標）を配置する。
 
     方針:
-        * 上円: 全体幅の中央に x を置き、最上段の少し上に y を置く。
-        * 下円: 全体幅の 1/4, 3/4 あたりに x を置き、最下段の少し下に y を置く。
+        * x座標は全行で共通:
+          - 上円: 全体幅の中央 (W/2)
+          - 下円: 全体幅の 1/4, 3/4
+        * y座標は各行の矩形位置に基づいて計算:
+          - 上円: その行より少し上
+          - 下円: その行より少し下
 
-    半径はここでは決めず、後で矩形のピボット距離から更新する。
+    半径は後で矩形のピボット距離から更新する。
     """
     total_width = infer_total_width(rects)
 
-    top_row_index = 0
-    bottom_row_index = len(row_specs) - 1
-    y_top_row = -(key_height + row_gap) * top_row_index
-    y_bottom_row = -(key_height + row_gap) * bottom_row_index
-
-    # 上円の中心（矩形群の中心 x に置く）
+    # 3つの中心x座標（全行で共通）
     top_cx = total_width * 0.5
-    top_cy = y_top_row + key_height + (key_height + row_gap)
-
-    # 下円2つの中心（左右対称）
-    bottom_cy = y_bottom_row - (key_height + row_gap)
     bottom_left_cx = total_width * 0.25
     bottom_right_cx = total_width * 0.75
 
-    circles: Dict[str, Circle] = {
-        "top": Circle(name="top", cx=top_cx, cy=top_cy),
-        "bottom_left": Circle(name="bottom_left", cx=bottom_left_cx, cy=bottom_cy),
-        "bottom_right": Circle(name="bottom_right", cx=bottom_right_cx, cy=bottom_cy),
-    }
+    circles: Dict[int, Dict[str, Circle]] = {}
+
+    for row_index in range(len(row_specs)):
+        # 各行のy座標
+        y_row = -(key_height + row_gap) * row_index
+
+        # 各行の円のy座標を計算
+        top_cy = y_row + key_height + (key_height + row_gap) * 0.5
+        bottom_cy = y_row - (key_height + row_gap) * 0.5
+
+        circles[row_index] = {
+            "top": Circle(name="top", row=row_index, cx=top_cx, cy=top_cy),
+            "bottom_left": Circle(name="bottom_left", row=row_index, cx=bottom_left_cx, cy=bottom_cy),
+            "bottom_right": Circle(name="bottom_right", row=row_index, cx=bottom_right_cx, cy=bottom_cy),
+        }
+
     return circles
 
 
-def assign_circles_to_rects(rects: List[RectInstance], circles: Dict[str, Circle]) -> None:
+def assign_circles_to_rects(rects: List[RectInstance], circles: Dict[int, Dict[str, Circle]]) -> None:
     """
     segment 種別に応じて、各矩形に円を割り当てる。
 
@@ -186,6 +194,8 @@ def assign_circles_to_rects(rects: List[RectInstance], circles: Dict[str, Circle
     * "bottom1" セグメント → 左下円 "bottom_left"
     * "bottom2" セグメント → 右下円 "bottom_right"
     * "horizontal"           → 円なし（回転なし）
+
+    各矩形は自分の行の円を参照する。
     """
     for r in rects:
         if r.segment == "top":
@@ -219,7 +229,7 @@ def choose_pivot(rect: RectInstance, circle: Circle) -> np.ndarray:
 
 def compute_rotation_angles(
     rects: List[RectInstance],
-    circles: Dict[str, Circle],
+    circles: Dict[int, Dict[str, Circle]],
     max_abs_angle_deg: float = 90.0,
 ) -> None:
     """
@@ -233,13 +243,14 @@ def compute_rotation_angles(
         * 角度を -180〜180 に正規化し、±max_abs_angle_deg にクリップ。
 
     これにより、「ピボットから見て矩形中心が円中心方向を向く」ように傾く。
+    各矩形は自分の行の円を参照する。
     """
     for r in rects:
         if r.circle_name is None:
             r.angle_deg = 0.0
             continue
 
-        circle = circles[r.circle_name]
+        circle = circles[r.row][r.circle_name]
         pivot = choose_pivot(r, circle)
 
         # 回転前の中心
@@ -271,9 +282,10 @@ def compute_rotation_angles(
         r.angle_deg = angle
 
 
-def rotate_rectangles(rects: List[RectInstance], circles: Dict[str, Circle]) -> None:
+def rotate_rectangles(rects: List[RectInstance], circles: Dict[int, Dict[str, Circle]]) -> None:
     """
     計算済みの angle_deg を使って、各矩形の回転後ポリゴンを求める。
+    各矩形は自分の行の円を参照する。
     """
     for r in rects:
         # 基本の4頂点（回転前）
@@ -293,7 +305,7 @@ def rotate_rectangles(rects: List[RectInstance], circles: Dict[str, Circle]) -> 
             r.polygon = corners
             continue
 
-        circle = circles[r.circle_name]
+        circle = circles[r.row][r.circle_name]
         pivot = choose_pivot(r, circle)
 
         theta = math.radians(r.angle_deg)
@@ -306,26 +318,31 @@ def rotate_rectangles(rects: List[RectInstance], circles: Dict[str, Circle]) -> 
         r.polygon = rotated
 
 
-def update_circle_radii(rects: List[RectInstance], circles: Dict[str, Circle]) -> None:
+def update_circle_radii(rects: List[RectInstance], circles: Dict[int, Dict[str, Circle]]) -> None:
     """
-    描画用に、各円の半径を「担当矩形のピボット〜円中心距離の平均」で設定する。
+    描画用に、各行の各円の半径を「その行の担当矩形のピボット〜円中心距離の平均」で設定する。
     本質的なロジックではなく、単に見た目のため。
     """
-    accum: Dict[str, List[float]] = {name: [] for name in circles.keys()}
+    # 行ごと、円名ごとの距離を蓄積
+    accum: Dict[int, Dict[str, List[float]]] = {}
+    for row in circles.keys():
+        accum[row] = {name: [] for name in circles[row].keys()}
 
     for r in rects:
         if r.circle_name is None:
             continue
-        circle = circles[r.circle_name]
+        circle = circles[r.row][r.circle_name]
         pivot = choose_pivot(r, circle)
         d = math.dist((pivot[0], pivot[1]), (circle.cx, circle.cy))
-        accum[r.circle_name].append(d)
+        accum[r.row][r.circle_name].append(d)
 
-    for name, dists in accum.items():
-        if dists:
-            circles[name].radius = sum(dists) / len(dists)
-        else:
-            circles[name].radius = 0.0
+    # 各行の各円の半径を平均距離で更新
+    for row in circles.keys():
+        for name, dists in accum[row].items():
+            if dists:
+                circles[row][name].radius = sum(dists) / len(dists)
+            else:
+                circles[row][name].radius = 0.0
 
 
 def evaluate_row_gaps(rects: List[RectInstance], row_count: int) -> List[float]:
@@ -353,9 +370,10 @@ def evaluate_row_gaps(rects: List[RectInstance], row_count: int) -> List[float]:
     return gaps
 
 
-def plot_layout(rects: List[RectInstance], circles: Dict[str, Circle]) -> None:
+def plot_layout(rects: List[RectInstance], circles: Dict[int, Dict[str, Circle]]) -> None:
     """
     matplotlib で矩形と円を描画する。
+    各行の円を描画する。
     """
     fig, ax = plt.subplots()
 
@@ -367,12 +385,13 @@ def plot_layout(rects: List[RectInstance], circles: Dict[str, Circle]) -> None:
         patch = Polygon(poly, closed=True, fill=False, linewidth=1.0)
         ax.add_patch(patch)
 
-    # 円（描画用）
-    for c in circles.values():
-        if c.radius <= 0:
-            continue
-        circle_patch = MplCircle((c.cx, c.cy), c.radius, fill=False, linestyle="--")
-        ax.add_patch(circle_patch)
+    # 円（各行の円を描画）
+    for row_circles in circles.values():
+        for c in row_circles.values():
+            if c.radius <= 0:
+                continue
+            circle_patch = MplCircle((c.cx, c.cy), c.radius, fill=False, linestyle="--")
+            ax.add_patch(circle_patch)
 
     ax.set_aspect("equal", adjustable="box")
     ax.invert_yaxis()  # 行0が画面上側になるよう反転
